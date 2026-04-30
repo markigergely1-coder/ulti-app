@@ -15,8 +15,8 @@ def _init():
         "gm_rounds": [],
         "gm_cr_szolista": 0,
         "gm_cr_bid": BID_NAMES[0],
-        "gm_cr_kontra": 1,
-        "gm_cr_kontra_label": "Nincs",
+        "gm_cr_component_kontrak": [1],
+        "gm_cr_component_kontra_labels": ["Nincs"],
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -39,19 +39,14 @@ def _score_row(players, scores, forint_alap):
         )
 
 
-def _pt_color(pts):
-    if pts > 0:
-        return f":green[+{pts}]"
-    elif pts < 0:
-        return f":red[{pts}]"
-    return f":gray[0]"
+def _kontra_suffix(component_kontra_labels):
+    parts = [l for l in component_kontra_labels if l != "Nincs"]
+    return f" [{', '.join(parts)}]" if parts else ""
 
 
 def _reset_game():
-    keys = ["gm_step", "gm_players", "gm_forint_alap", "gm_scores", "gm_rounds",
-            "gm_cr_szolista", "gm_cr_bid", "gm_cr_kontra", "gm_cr_kontra_label"]
-    for k in keys:
-        if k in st.session_state:
+    for k in list(st.session_state.keys()):
+        if k.startswith("gm_"):
             del st.session_state[k]
 
 
@@ -94,41 +89,49 @@ def _render_round_bid():
 
     _score_row(players, scores, forint_alap)
 
-    # Utolsó kör gyors összefoglalója
     if rounds:
         last = rounds[-1]
         pts = last["points"]
-        parts = [f"{players[i]}: {_pt_color(pts[i])}" for i in range(3)]
-        st.caption(f"Előző kör – {last['szolista_name']} / {last['bid']}"
-                   + (f" ({last['kontra_label']})" if last["kontra"] > 1 else "")
-                   + " → " + "  |  ".join(parts))
+        parts = []
+        for i in range(3):
+            p = pts[i]
+            s = "+" if p > 0 else ""
+            parts.append(f"{players[i]}: {s}{p}")
+        suffix = _kontra_suffix(last.get("component_kontra_labels", []))
+        st.caption(f"Előző kör – {last['szolista_name']} / {last['bid']}{suffix} → {'  |  '.join(parts)}")
 
     st.divider()
     st.subheader(f"Kör #{len(rounds) + 1} – Licit")
 
-    szolista_name = st.radio(
-        "Ki játszik?", players, horizontal=True, key="gm_bid_szolista_radio"
-    )
+    szolista_name = st.radio("Ki játszik?", players, horizontal=True, key="gm_bid_szolista_radio")
     szolista_idx = players.index(szolista_name)
 
     bid_name = st.selectbox("Licit", BID_NAMES, key="gm_bid_name_select")
+    components = BIDS[bid_name]["components"]
 
-    # Info a licitről
-    total_fig = get_total_figure(bid_name)
-    comps = BIDS[bid_name]["components"]
-    if len(comps) > 1:
-        comp_str = " + ".join(f"{c['name']} ({c['figure']})" for c in comps)
-        st.caption(f"Komponensek: {comp_str}  |  Összfigura: {total_fig}")
+    # Per-komponens kontra
+    st.write("**Kontra:**")
+    component_kontrak = []
+    component_kontra_labels = []
+
+    for i, comp in enumerate(components):
+        label = st.radio(
+            f"{comp['name']}  ({comp['figure']} pont)",
+            list(KONTRA_LEVELS.keys()),
+            horizontal=True,
+            key=f"gm_bid_kontra_{i}",
+        )
+        mult = KONTRA_LEVELS[label]
+        component_kontrak.append(mult)
+        component_kontra_labels.append(label)
+
+    # Összesített info
+    eff_fig = sum(comp["figure"] * component_kontrak[i] for i, comp in enumerate(components))
+    base_fig = sum(c["figure"] for c in components)
+    if eff_fig != base_fig:
+        st.caption(f"Összfigura: {base_fig} → kontrakkal: **{eff_fig}**  |  Szólista: ±{2*eff_fig}, fogók: ∓{eff_fig}")
     else:
-        st.caption(f"Figura: {total_fig}  |  Szólista nyerés: +{2*total_fig} / bukás: -{2*total_fig}  |  Fogók: ∓{total_fig}")
-
-    kontra_label = st.radio(
-        "Kontra", list(KONTRA_LEVELS.keys()), horizontal=True, key="gm_bid_kontra_radio"
-    )
-    kontra_mult = KONTRA_LEVELS[kontra_label]
-    if kontra_mult > 1:
-        adj_fig = total_fig * kontra_mult
-        st.caption(f"Kontrával: szólista ±{2*adj_fig}, fogók ∓{adj_fig}")
+        st.caption(f"Összfigura: {base_fig}  |  Szólista: ±{2*base_fig}, fogók: ∓{base_fig}")
 
     st.divider()
     col1, col2 = st.columns(2)
@@ -136,8 +139,8 @@ def _render_round_bid():
         if st.button("Eredmény rögzítése →", type="primary", use_container_width=True):
             st.session_state.gm_cr_szolista = szolista_idx
             st.session_state.gm_cr_bid = bid_name
-            st.session_state.gm_cr_kontra = kontra_mult
-            st.session_state.gm_cr_kontra_label = kontra_label
+            st.session_state.gm_cr_component_kontrak = component_kontrak
+            st.session_state.gm_cr_component_kontra_labels = component_kontra_labels
             st.session_state.gm_step = "round_result"
             st.rerun()
     with col2:
@@ -145,39 +148,41 @@ def _render_round_bid():
             st.session_state.gm_step = "finished"
             st.rerun()
 
-    # Körök naplója
     if rounds:
         with st.expander(f"Körök naplója ({len(rounds)} kör)"):
-            for idx, r in enumerate(reversed(rounds), 1):
+            for j, r in enumerate(rounds, 1):
                 pts = r["points"]
                 pts_str = "  ".join(
                     f"{players[i]}: {'+' if pts[i]>0 else ''}{pts[i]}" for i in range(3)
                 )
-                kontra_suffix = f" [{r['kontra_label']}]" if r["kontra"] > 1 else ""
-                st.write(f"**{len(rounds)-idx+1}.** {r['szolista_name']} – {r['bid']}{kontra_suffix} → {pts_str}")
+                suffix = _kontra_suffix(r.get("component_kontra_labels", []))
+                st.write(f"**{j}.** {r['szolista_name']} – {r['bid']}{suffix} → {pts_str}")
 
 
 def _render_round_result():
     players = st.session_state.gm_players
     szolista_idx = st.session_state.gm_cr_szolista
     bid_name = st.session_state.gm_cr_bid
-    kontra_mult = st.session_state.gm_cr_kontra
-    kontra_label = st.session_state.gm_cr_kontra_label
+    component_kontrak = st.session_state.gm_cr_component_kontrak
+    component_kontra_labels = st.session_state.gm_cr_component_kontra_labels
 
     st.subheader("Eredmény rögzítése")
 
-    kontra_str = f" — **{kontra_label}**" if kontra_mult > 1 else ""
-    st.info(f"**{players[szolista_idx]}** játszik  ·  **{bid_name}**{kontra_str}")
+    suffix = _kontra_suffix(component_kontra_labels)
+    st.info(f"**{players[szolista_idx]}** játszik  ·  **{bid_name}**{suffix}")
 
     components = BIDS[bid_name]["components"]
     results = []
 
     for i, comp in enumerate(components):
-        fig_kontra = comp["figure"] * kontra_mult
-        label = f"**{comp['name']}** – figura: {comp['figure']}" + (
-            f" × {kontra_mult} = **{fig_kontra}**" if kontra_mult > 1 else f" = **{fig_kontra}**"
-        )
-        st.markdown(label)
+        mult = component_kontrak[i]
+        fig_eff = comp["figure"] * mult
+        kontra_str = f" × {mult} = **{fig_eff}**" if mult > 1 else f" = **{fig_eff}**"
+        label_str = f"**{comp['name']}** – {comp['figure']}{kontra_str} pont"
+        if component_kontra_labels[i] != "Nincs":
+            label_str += f"  _{component_kontra_labels[i]}_"
+        st.markdown(label_str)
+
         success = st.radio(
             "Eredmény",
             ["✅ Sikerült", "❌ Nem sikerült"],
@@ -189,8 +194,8 @@ def _render_round_result():
         if i < len(components) - 1:
             st.write("")
 
-    # Előnézet
-    points = calculate_round_points(szolista_idx, bid_name, kontra_mult, results)
+    points = calculate_round_points(szolista_idx, bid_name, component_kontrak, results)
+
     st.divider()
     st.write("**Várható pontok:**")
     cols = st.columns(3)
@@ -210,10 +215,10 @@ def _render_round_result():
                 "szolista": szolista_idx,
                 "szolista_name": players[szolista_idx],
                 "bid": bid_name,
-                "kontra": kontra_mult,
-                "kontra_label": kontra_label,
+                "component_kontrak": component_kontrak,
+                "component_kontra_labels": component_kontra_labels,
                 "components": [
-                    {**comp, "success": results[j]}
+                    {**comp, "success": results[j], "kontra": component_kontrak[j]}
                     for j, comp in enumerate(components)
                 ],
                 "points": points,
@@ -221,7 +226,6 @@ def _render_round_result():
             st.session_state.gm_rounds.append(round_data)
             for i in range(3):
                 st.session_state.gm_scores[i] += points[i]
-            # Töröljük az eredmény radio-k session state értékeit, hogy ne maradjanak
             for i in range(len(components)):
                 st.session_state.pop(f"gm_res_{i}", None)
             st.session_state.gm_step = "round_bid"
@@ -235,10 +239,8 @@ def _render_finished(db):
     rounds = st.session_state.gm_rounds
 
     st.subheader("🏁 Játék vége – Végeredmény")
-
     _score_row(players, scores, forint_alap)
 
-    # Részletes táblázat
     st.divider()
     st.write("**Forint elszámolás:**")
     for i in range(3):
@@ -259,12 +261,9 @@ def _render_finished(db):
                 "created_at": datetime.now(timezone.utc).isoformat(),
                 "players": players,
                 "forint_alap": forint_alap,
-                "final_scores": list(scores.values()),
+                "final_scores": [scores[i] for i in range(3)],
                 "rounds": [
-                    {
-                        **r,
-                        "points": [r["points"][i] for i in range(3)],
-                    }
+                    {**r, "points": [r["points"][i] for i in range(3)]}
                     for r in rounds
                 ],
             }
@@ -278,16 +277,15 @@ def _render_finished(db):
             _reset_game()
             st.rerun()
 
-    # Körök összefoglalója
     if rounds:
         with st.expander(f"Összes kör ({len(rounds)})"):
-            for i, r in enumerate(rounds, 1):
+            for j, r in enumerate(rounds, 1):
                 pts = r["points"]
                 pts_str = "  ".join(
-                    f"{players[j]}: {'+' if pts[j]>0 else ''}{pts[j]}" for j in range(3)
+                    f"{players[i]}: {'+' if pts[i]>0 else ''}{pts[i]}" for i in range(3)
                 )
-                kontra_suffix = f" [{r['kontra_label']}]" if r["kontra"] > 1 else ""
-                st.write(f"**{i}.** {r['szolista_name']} – {r['bid']}{kontra_suffix} → {pts_str}")
+                suffix = _kontra_suffix(r.get("component_kontra_labels", []))
+                st.write(f"**{j}.** {r['szolista_name']} – {r['bid']}{suffix} → {pts_str}")
 
 
 # ── Belépőpont ────────────────────────────────────────────────────────────────
